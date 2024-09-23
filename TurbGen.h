@@ -64,6 +64,12 @@ class TurbGen
         std::string ClassSignature; // class signature
         std::string parameter_file; // parameter file for controlling turbulence driving
         std::vector<double> mode[3], aka[3], akb[3], OUphases, ampl; // modes arrays, phases, amplitudes
+
+#ifdef BL_AMREX_H
+        amrex::Gpu::DeviceVector<double> AmplGPU; 
+#endif
+
+
         int PE; // MPI task for printf purposes, if provided
         int nmodes; // number of modes
         double ndim; // number of spatial dimensions
@@ -375,6 +381,9 @@ class TurbGen
         }
         get_decomposition_coeffs(); // calculate solenoidal and compressive coefficients (aka, akb) from OUphases
         double time_gen = step * dt;
+
+        sync_to_GPU();
+
         if (verbose) TurbGen_printf("Generated new turbulence driving pattern: #%6i, time = %e, time/t_turb = %-7.2f\n", step, time_gen, time_gen/t_decay);
         if (PE == 0) write_to_evol_file(time, ampl_factor, v_turb); // write evolution file
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
@@ -521,6 +530,124 @@ class TurbGen
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
     } // get_turb_vector_unigrid
 
+
+    public: void sync_to_GPU(){
+
+        amrex::Gpu::PinnedVector<amrex::Real> pinnedAmpl(ampl.size());
+        std::copy(ampl.begin(), ampl.end(), pinnedAmpl.begin());
+
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, ampl.begin(), ampl.end(), AmplGPU.start());
+    }
+
+    public: void get_turb_vector_unigrid(amrex::FArrayBox& fab, amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &cellSizes) {
+        // ******************************************************
+        // Compute physical turbulent vector field on a uniform grid, provided
+        // start coordinate pos_beg[ndim] and end coordinate pos_end[ndim]
+        // of the grid and number of points in grid n[ndim].
+        // Return into turbulent vector field into float * return_grid[ndim].
+        // Note that index in return_grid[X][index] is looped with x (index i)
+        // as the inner loop and with z (index k) as the outer loop.
+        // ******************************************************
+
+        // const double pos_beg[], const double pos_end[], const int n[]
+
+        const amrex::Box &box = fab.box();
+        amrex::Array4<amrex::Real> fieldArray = fab.array();
+
+        const int index_beg[] = {
+            AMREX_D_DECL(box.smallEnd()[0], box.smallEnd()[1], box.smallEnd()[2]) };
+
+
+        const amrex::Real pos_beg[] = { 
+                AMREX_D_DECL(
+                box.smallEnd()[0] * cellSizes[0],
+                box.smallEnd()[1] * cellSizes[1],
+                box.smallEnd()[2] * cellSizes[2])
+        };
+
+        const amrex::Real pos_end[] = {
+                AMREX_D_DECL(
+                box.bigEnd()[0] * cellSizes[0],
+                box.bigEnd()[1] * cellSizes[1],
+                box.bigEnd()[2] * cellSizes[2])
+        };
+
+        const int n[] = {
+            AMREX_D_DECL(
+                box.length3d()[0],
+                box.length3d()[1],
+                box.length3d()[2])
+        };
+
+        if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"entering.\n");
+        if (verbose > 1) TurbGen_printf("pos_beg = %f %f %f, pos_end = %f %f %f, n = %i %i %i\n",
+                                        pos_beg[X], pos_beg[Y], pos_beg[Z], pos_end[X], pos_end[Y], pos_end[Z], n[X], n[Y], n[Z]);
+
+        // compute output grid cell width (dx, dy, dz)
+        double del[3] = {1.0, 1.0, 1.0};
+        for (int d = 0; d < (int)ndim; d++) if (n[d] > 1) del[d] = (pos_end[d] - pos_beg[d]) / (n[d]-1);
+        // pre-compute amplitude including normalisation factors
+        std::vector<double> ampl(nmodes);
+        for (int m = 0; m < nmodes; m++) ampl[m] = 2.0 * sol_weight_norm * this->ampl[m];
+        // pre-compute grid position geometry, and trigonometry, to speed-up loops over modes below
+        std::vector< std::vector<amrex::Real> > sinxi(n[X], std::vector<amrex::Real>(nmodes));
+        std::vector< std::vector<amrex::Real> > cosxi(n[X], std::vector<amrex::Real>(nmodes));
+        std::vector< std::vector<amrex::Real> > sinyj(n[Y], std::vector<amrex::Real>(nmodes));
+        std::vector< std::vector<amrex::Real> > cosyj(n[Y], std::vector<amrex::Real>(nmodes));
+        std::vector< std::vector<amrex::Real> > sinzk(n[Z], std::vector<amrex::Real>(nmodes));
+        std::vector< std::vector<amrex::Real> > coszk(n[Z], std::vector<amrex::Real>(nmodes));
+        for (int m = 0; m < nmodes; m++) {
+            for (int i = 0; i < n[X]; i++) {
+                sinxi[i][m] = sin(mode[X][m]*(pos_beg[X]+i*del[X]));
+                cosxi[i][m] = cos(mode[X][m]*(pos_beg[X]+i*del[X]));
+            }
+            for (int j = 0; j < n[Y]; j++) {
+                if ((int)ndim > 1) {
+                    sinyj[j][m] = sin(mode[Y][m]*(pos_beg[Y]+j*del[Y]));
+                    cosyj[j][m] = cos(mode[Y][m]*(pos_beg[Y]+j*del[Y]));
+                } else {
+                    sinyj[j][m] = 0.0;
+                    cosyj[j][m] = 1.0;
+                }
+            }
+            for (int k = 0; k < n[Z]; k++) {
+                if ((int)ndim > 2) {
+                    sinzk[k][m] = sin(mode[Z][m]*(pos_beg[Z]+k*del[Z]));
+                    coszk[k][m] = cos(mode[Z][m]*(pos_beg[Z]+k*del[Z]));
+                } else {
+                    sinzk[k][m] = 0.0;
+                    coszk[k][m] = 1.0;
+                }
+            }
+        }
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            amrex::Real v[3];
+            amrex::Real real, imag;
+            
+            v[X] = 0.0; v[Y] = 0.0; v[Z] = 0.0;
+            // loop over modes
+            for (int m = 0; m < nmodes; m++) {
+                // these are the real and imaginary parts, respectively, of
+                //  e^{ i \vec{k} \cdot \vec{x} } = cos(kx*x + ky*y + kz*z) + i sin(kx*x + ky*y + kz*z)
+                real =  ( cosxi[i - index_beg[0]][m]*cosyj[j- index_beg[1]][m] - sinxi[i - index_beg[0]][m]*sinyj[j - index_beg[1]][m] ) * coszk[k - index_beg[2]][m] -
+                        ( sinxi[i - index_beg[0]][m]*cosyj[j - index_beg[1]][m] + cosxi[i - index_beg[0]][m]*sinyj[j - index_beg[1]][m] ) * sinzk[k - index_beg[2]][m];
+                imag =  ( cosyj[j - index_beg[1]][m]*sinzk[k - index_beg[2]][m] + sinyj[j - index_beg[1]][m]*coszk[k - index_beg[2]][m] ) * cosxi[i - index_beg[0]][m] +
+                        ( cosyj[j - index_beg[1]][m]*coszk[k - index_beg[2]][m] - sinyj[j- index_beg[1] ][m]*sinzk[k - index_beg[2]][m] ) * sinxi[i - index_beg[0]][m];
+                // accumulate total v as sum over modes
+                v[X] += ampl[m] * (aka[X][m]*real - akb[X][m]*imag);
+                if constexpr(AMREX_SPACEDIM > 1) v[Y] += ampl[m] * (aka[Y][m]*real - akb[Y][m]*imag);
+                if constexpr(AMREX_SPACEDIM > 2) v[Z] += ampl[m] * (aka[Z][m]*real - akb[Z][m]*imag);
+            }
+            // copy into return grid
+            fieldArray(i,j,k,0) = v[X] * ampl_factor[X];
+            if constexpr(AMREX_SPACEDIM > 1) fieldArray(i,j,k,1) = v[Y] * ampl_factor[Y];
+            if constexpr(AMREX_SPACEDIM > 2) fieldArray(i,j,k,2) = v[Z] * ampl_factor[Z];
+
+        });
+
+        if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
+    } // get_turb_vector_unigrid (AMREX overload)
 
     // ******************************************************
     public: void get_turb_vector(const double pos[], double v[]) {
