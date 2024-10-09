@@ -86,7 +86,7 @@ class TurbGen
         std::vector<double> mode[3], aka[3], akb[3], OUphases, ampl; // modes arrays, phases, amplitudes
 
 #ifdef BL_AMREX_H
-        amrex::Gpu::DeviceVector<double> modesGPU, akaGPU, akbGPU;
+        amrex::Gpu::DeviceVector<double> modesGPU[3], akaGPU[3], akbGPU[3];
         amrex::Gpu::DeviceVector<double> AmplGPU;
 #endif
 
@@ -556,20 +556,16 @@ class TurbGen
 
 #ifdef BL_AMREX_H
     private: void inital_sync_to_GPU(){
-
-        AmplGPU.resize(ampl.size());
-        modesGPU.resize(nmodes * 3);
-        akaGPU.resize(nmodes * 3);
-        akbGPU.resize(nmodes *3);
-        
         for (int dim = 0; dim < 3; dim++) {
-             amrex::Gpu::copy(amrex::Gpu::hostToDevice, mode[dim].begin(), mode[dim].end(), modesGPU.begin() + nmodes * dim);
+            modesGPU[dim].resize(mode[dim].size()); 
+            amrex::Gpu::copy(amrex::Gpu::hostToDevice, mode[dim].begin(), mode[dim].end(), modesGPU[dim].begin());
          }
     }
 
     private: void sync_to_GPU(){
         
         {
+            AmplGPU.resize(ampl.size());
             amrex::Gpu::PinnedVector<double> pinnedAmpl(ampl.size());
             std::copy(ampl.begin(), ampl.end(), pinnedAmpl.begin());
             amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedAmpl.begin(), pinnedAmpl.end(), AmplGPU.begin());
@@ -577,15 +573,17 @@ class TurbGen
 
 
         for (int dim = 0; dim < 3; dim++) {
+            akaGPU[dim].resize(aka[dim].size()); 
+            akbGPU[dim].resize(akb[dim].size()); 
             {
                 amrex::Gpu::PinnedVector<double> pinnedAka(aka[dim].size());
                 std::copy(aka[dim].begin(), aka[dim].end(), pinnedAka.begin()); 
-                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedAka.begin(), pinnedAka.end(), akaGPU.begin() + dim*nmodes);
+                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedAka.begin(), pinnedAka.end(), akaGPU[dim].begin());
             }
             {
                 amrex::Gpu::PinnedVector<double> pinnedakb(akb[dim].size());
                 std::copy(akb[dim].begin(), akb[dim].end(), pinnedakb.begin()); 
-                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedakb.begin(), pinnedakb.end(), akbGPU.begin() + dim*nmodes);
+                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedakb.begin(), pinnedakb.end(), akbGPU[dim].begin());
             }
          }
     }
@@ -605,137 +603,100 @@ class TurbGen
         const amrex::Box &box = fab.box();
         amrex::Array4<amrex::Real> fieldArray = fab.array();
 
-        const amrex::GpuArray<int, 3> index_beg{
-                (box.smallEnd()[0]),
-                (AMREX_SPACEDIM >= 2 ? box.smallEnd()[1]: 0),
-                (AMREX_SPACEDIM == 3 ? box.smallEnd()[2] : 0)
-        };
-
-
-        const amrex::GpuArray<amrex::Real, 3> pos_beg {   
-                box.smallEnd()[0] * cellSizes[0],
-                (AMREX_SPACEDIM >= 2 ? box.smallEnd()[1] * cellSizes[1] : 0.0),
-                (AMREX_SPACEDIM == 3 ? box.smallEnd()[2] * cellSizes[2] : 0.0)
-        };
-
-        const amrex::GpuArray<amrex::Real, 3> pos_end{
-                box.bigEnd()[0] * cellSizes[0],
-                (AMREX_SPACEDIM >= 2 ? box.bigEnd()[1] * cellSizes[1] : 0.0),
-                (AMREX_SPACEDIM == 3 ? box.bigEnd()[2] * cellSizes[2] : 0.0)
-        };
-
-        const amrex::GpuArray<int, 3> n{
-                box.length3d()[0],
-                (AMREX_SPACEDIM >= 2 ? box.length3d()[1] : 1),
-                (AMREX_SPACEDIM == 3 ? box.length3d()[2] : 1)
-        };
-
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"entering.\n");
-        if (verbose > 1) TurbGen_printf("pos_beg = %f %f %f, pos_end = %f %f %f, n = %i %i %i\n",
-                                        pos_beg[X], pos_beg[Y], pos_beg[Z], pos_end[X], pos_end[Y], pos_end[Z], n[X], n[Y], n[Z]);
 
         // compute output grid cell width (dx, dy, dz)
-        amrex::GpuArray<amrex::Real, 3> del{1.0, 1.0, 1.0};
+        amrex::GpuArray<amrex::Real, 3> del{cellSizes[0], cellSizes[1], cellSizes[2]};
 
-        for (int d = 0; d < AMREX_SPACEDIM; d++) if (n[d] > 1) del[d] = (pos_end[d] - pos_beg[d]) / (n[d]-1);
         // pre-compute amplitude including normalisation factors
         std::vector<double> ampl(nmodes);
         for (int m = 0; m < nmodes; m++) ampl[m] = 2.0 * sol_weight_norm * this->AmplGPU[m];
         // pre-compute grid position geometry, and trigonometry, to speed-up loops over modes below
 
 
-        amrex::Box xSpace(amrex::IntVect(box.smallEnd()[0], 0), amrex::IntVect(box.bigEnd()[0], nmodes - 1));
-        amrex::Box ySpace;
-        amrex::Box zSpace;
+        amrex::Box xSpace(amrex::IntVect(AMREX_D_DECL(box.smallEnd()[0],0,0)), amrex::IntVect(AMREX_D_DECL(box.bigEnd()[0], 0,0)));
+        amrex::Box ySpace(amrex::IntVect(AMREX_D_DECL(0,box.smallEnd()[1],0)), amrex::IntVect(AMREX_D_DECL(0, box.bigEnd()[0],0)));
+        amrex::Box zSpace(amrex::IntVect(AMREX_D_DECL(0,0,box.smallEnd()[2])), amrex::IntVect(AMREX_D_DECL(0,0,box.bigEnd()[2])));
 
-        const int SIN_INDEX = 0;
-        const int COS_INDEX = 1;
+        int comps =  nmodes * 2;
+        amrex::FArrayBox PrecompFab (box, comps);
+        amrex::Array4 Precomp = PrecompFab.array();
 
-        if constexpr(AMREX_SPACEDIM > 2)
-        {
-            ySpace = amrex::Box(amrex::IntVect(box.smallEnd()[1], 0), amrex::IntVect(box.bigEnd()[1], nmodes - 1));
-            zSpace = amrex::Box(amrex::IntVect(box.smallEnd()[2], 0), amrex::IntVect(box.bigEnd()[2], nmodes - 1));
-        }else if constexpr(AMREX_SPACEDIM > 1){
-            ySpace = amrex::Box(amrex::IntVect(box.smallEnd()[1], 0), amrex::IntVect(box.bigEnd()[1], nmodes - 1));
-            zSpace = amrex::Box(amrex::IntVect(0, 0), amrex::IntVect(1, nmodes - 1), amrex::IntVect(1,1));
-        } else {
-            ySpace = amrex::Box(amrex::IntVect(0, 0), amrex::IntVect(1, nmodes - 1));
-            zSpace = amrex::Box(amrex::IntVect(0, 0), amrex::IntVect(1, nmodes - 1));
-        }
-
-        amrex::FArrayBox xPrecompFab (xSpace, 2);
-        amrex::Array4 xPrecomp = xPrecompFab.array();               
-
-        const double* modesGPUPtr = modesGPU.begin();
-        
-
-
-        amrex::ParallelFor(xSpace,  [=] AMREX_GPU_DEVICE(int i, int m, int dud) {
-            double a = modesGPUPtr[0];
-            xPrecomp(i, m, dud, SIN_INDEX) = sin(modesGPUPtr[m + X * nmodes] * (pos_beg[X] + i * del[X]));
-            xPrecomp(i, m, dud, COS_INDEX) = cos(modesGPUPtr[m + X * nmodes] * (pos_beg[X] + i * del[X]));
-        } );
-        
-        amrex::FArrayBox yPrecompFab (ySpace, 2);
-        amrex::Array4 yPrecomp = yPrecompFab.array();               
-
-        amrex::ParallelFor(ySpace,  [=] AMREX_GPU_DEVICE(int j, int m, int dud) {
-            if (AMREX_SPACEDIM > 1) {
-                    yPrecomp(j,m,dud,SIN_INDEX) = sin(modesGPUPtr[m + Y * nmodes]*(pos_beg[Y]+j*del[Y]));
-                    yPrecomp(j,m,dud,COS_INDEX) = cos(modesGPUPtr[m + Y * nmodes]*(pos_beg[Y]+j*del[Y]));
-                } else {
-                    yPrecomp(j,m,dud,SIN_INDEX) = 0.0;
-                    yPrecomp(j,m,dud,COS_INDEX) = 1.0;
-                }
-        });
-
-        amrex::FArrayBox zPrecompFab (zSpace, 2);
-        amrex::Array4 zPrecomp = zPrecompFab.array();               
-
-        amrex::ParallelFor(zSpace,  [=] AMREX_GPU_DEVICE(int k, int m, int dud) {
-            if (AMREX_SPACEDIM > 1) {
-                    zPrecomp(k,m,dud,SIN_INDEX) = sin(modesGPUPtr[m + Z * nmodes]*(pos_beg[Z]+k*del[Z]));
-                    zPrecomp(k,m,dud,COS_INDEX) = cos(modesGPUPtr[m + Z * nmodes]*(pos_beg[Z]+k*del[Z]));
-                } else {
-                    zPrecomp(k,m,dud,SIN_INDEX) = 0.0;
-                    zPrecomp(k,m,dud,COS_INDEX) = 1.0;
-                }
-        });
-
-        const double* akaGPUPtr = akaGPU.begin();
-        const double* akbGPUPtr = akbGPU.begin();
-
-        amrex::Real v[3];
-        amrex::Real* vPtr = v;
         const double* ampl_factorPrt = ampl_factor;
         double* AmplGPUPointer = AmplGPU.begin();
 
+        double* modesGpuPrt[3] = {modesGPU[0].begin(), modesGPU[1].begin(), modesGPU[2].begin()};
+        double* akaGpuPrt[3] = {akaGPU[0].begin(), akaGPU[1].begin(), akaGPU[2].begin()};
+        double* akbGpuPrt[3] = {akbGPU[0].begin(), akbGPU[1].begin(), akbGPU[2].begin()};
+
+
+        amrex::ParallelFor(xSpace, nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
+            const int SIN_INDEX = m;
+            const int COS_INDEX = m + nmodes; 
+
+            Precomp(i, j, k, SIN_INDEX) = sin(modesGpuPrt[X][m] * (i * del[X]));
+            Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[X][m] * (i * del[X]));
+        } );       
+
+        amrex::ParallelFor( ySpace,nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
+            const int SIN_INDEX = m;
+            const int COS_INDEX = m + nmodes; 
+            if (AMREX_SPACEDIM > 1) {
+                    Precomp(i,j,k,SIN_INDEX) = sin(modesGpuPrt[Y][m]*(j*del[Y]));
+                    Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[Y][m]*(j*del[Y]));
+                } else {
+                    Precomp(i,j,k,SIN_INDEX) = 0.0;
+                    Precomp(i, j, k, COS_INDEX) = 1.0;
+                }
+        });                
+
+        amrex::ParallelFor(zSpace, nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
+            const int SIN_INDEX = m;
+            const int COS_INDEX = m + nmodes; 
+            if (AMREX_SPACEDIM > 2) {
+                    Precomp(i, j, k, SIN_INDEX) = sin(modesGpuPrt[Z][m]*(k*del[Z]));
+                    Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[Z][m]*(k*del[Z]));
+                } else {
+                    Precomp(i, j, k, SIN_INDEX) = 0.0;
+                    Precomp(i, j, k, COS_INDEX) = 1.0;
+                }
+        });
+
+        
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
             amrex::Real real, imag;
             
-            vPtr[X] = 0.0; vPtr[Y] = 0.0; vPtr[Z] = 0.0;
+            amrex::Real v[3];
+
+            v[X] = 0.0; v[Y] = 0.0; v[Z] = 0.0;
             // loop over modes
             for (int m = 0; m < nmodes; m++) {
                 // these are the real and imaginary parts, respectively, of
                 //  e^{ i \vec{k} \cdot \vec{x} } = cos(kx*x + ky*y + kz*z) + i sin(kx*x + ky*y + kz*z)
 
-                real =  ( xPrecomp(i,m, 0,COS_INDEX) * yPrecomp(j,m,0,COS_INDEX) - xPrecomp(i,m,0, SIN_INDEX) * yPrecomp(j,m,0,SIN_INDEX) ) * zPrecomp(k,m,0,COS_INDEX) -
-                        ( xPrecomp(i,m,0, SIN_INDEX) * yPrecomp(j,m,0,COS_INDEX) + xPrecomp(i,m,0, COS_INDEX) * yPrecomp(j,m,0,SIN_INDEX) ) * zPrecomp(k,m,0,SIN_INDEX);
+                const int SIN_INDEX = m;
+                const int COS_INDEX = m + nmodes; 
 
-                imag =  ( yPrecomp(j,m,0,COS_INDEX) * zPrecomp(k,m,0,SIN_INDEX) + yPrecomp(j,m,0,SIN_INDEX) * zPrecomp(k,m,0,COS_INDEX) ) * xPrecomp(i,m,0,COS_INDEX) +
-                        ( yPrecomp(j,m,0,COS_INDEX) * zPrecomp(k,m,0,COS_INDEX) - yPrecomp(j,m,0,SIN_INDEX) * zPrecomp(k,m,0,SIN_INDEX) ) * xPrecomp(i,m,0, SIN_INDEX);
+                real =  ( Precomp(i,0, 0,COS_INDEX) * Precomp(0,j,0,COS_INDEX) - Precomp(i,0,0, SIN_INDEX) * Precomp(0,j,0,SIN_INDEX) ) * Precomp(0,0,k,COS_INDEX) -
+                        ( Precomp(i,0,0, SIN_INDEX) * Precomp(0,j,0,COS_INDEX) + Precomp(i,0,0, COS_INDEX) * Precomp(0,j,0,SIN_INDEX) ) * Precomp(0,0,k,SIN_INDEX);
+
+                imag =  ( Precomp(0,j,0,COS_INDEX) * Precomp(0,0,k,SIN_INDEX) + Precomp(0,j,0,SIN_INDEX) * Precomp(0,0,k,COS_INDEX) ) * Precomp(i,0,0,COS_INDEX) +
+                        ( Precomp(0,j,0,COS_INDEX) * Precomp(0,0,k,COS_INDEX) - Precomp(0,j,0,SIN_INDEX) * Precomp(0,0,k,SIN_INDEX) ) * Precomp(i,0,0, SIN_INDEX);
 
                 // accumulate total v as sum over modes
-                vPtr[X] += AmplGPUPointer[m] * (akaGPUPtr[m + X * nmodes]*real - akbGPUPtr[m + X * nmodes]*imag);
-                if (AMREX_SPACEDIM > 1) vPtr[Y] += AmplGPUPointer[m] * (akaGPUPtr[m + Y * nmodes]*real - akbGPUPtr[m + Y * nmodes]*imag);
-                if (AMREX_SPACEDIM > 2) vPtr[Z] += AmplGPUPointer[m] * (akaGPUPtr[m + Z * nmodes]*real - akbGPUPtr[m + Z * nmodes]*imag);
+                v[X] += AmplGPUPointer[m] * (akaGpuPrt[X][m]*real - akbGpuPrt[X][m]*imag);
+                if (AMREX_SPACEDIM > 1) v[Y] += AmplGPUPointer[m] * (akaGpuPrt[Y][m]*real - akbGpuPrt[Y][m]*imag);
+                if (AMREX_SPACEDIM > 2) v[Z] += AmplGPUPointer[m] * (akaGpuPrt[Z][m]*real - akbGpuPrt[Z][m]*imag);
             }
             // copy into return grid
-            fieldArray(i,j,k,0) = vPtr[X] * ampl_factorPrt[X];
-            if (AMREX_SPACEDIM > 1) fieldArray(i,j,k,1) = vPtr[Y] * ampl_factorPrt[Y];
-            if (AMREX_SPACEDIM > 2) fieldArray(i,j,k,2) = vPtr[Z] * ampl_factorPrt[Z];
+            fieldArray(i,j,k,0) = v[X] * ampl_factorPrt[X];
+            if (AMREX_SPACEDIM > 1) fieldArray(i,j,k,1) = v[Y] * ampl_factorPrt[Y];
+            if (AMREX_SPACEDIM > 2) fieldArray(i,j,k,2) = v[Z] * ampl_factorPrt[Z];
 
         });
+
+        double a = fieldArray(0,0,0,0);
+        double b = 12; 
 
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
     } // get_turb_vector_unigrid (AMReX overload)
@@ -1085,7 +1046,6 @@ class TurbGen
         #ifdef BL_AMREX_H
 
         inital_sync_to_GPU();
-        sync_to_GPU();
 
         #endif
 
