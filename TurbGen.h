@@ -78,18 +78,12 @@ namespace NameSpaceTurbGen {
 
 class TurbGen
 {
-    private:
+    protected:
         enum {X, Y, Z};
         int verbose; // shell output level (0: no output, 1: standard output, 2: more output)
         std::string ClassSignature; // class signature
         std::string parameter_file; // parameter file for controlling turbulence driving
         std::vector<double> mode[3], aka[3], akb[3], OUphases, ampl; // modes arrays, phases, amplitudes
-
-#ifdef BL_AMREX_H
-        amrex::Gpu::DeviceVector<double> modesGPU[3], akaGPU[3], akbGPU[3];
-        amrex::Gpu::DeviceVector<double> AmplGPU;
-#endif
-
 
         int PE; // MPI task for printf purposes, if provided
         int nmodes; // number of modes
@@ -138,7 +132,7 @@ class TurbGen
     };
 
     // get function signature for printing to stdout
-    private: std::string FuncSig(const std::string func_name)
+    protected: std::string FuncSig(const std::string func_name)
     { return func_name+": "; };
 
     // ******************************************************
@@ -253,7 +247,7 @@ class TurbGen
         return init_driving(parameter_file, 0.0); // call with time = 0.0
     }; // init_driving (overloaded)
     // ******************************************************
-    public: int init_driving(std::string parameter_file, const double time) {
+    public: virtual int init_driving(std::string parameter_file, const double time) {
         // ******************************************************
         // Initialise the turbulence generator and all relevant internal data structures by reading from 'parameter_file'.
         // This is used for driving turbulence (as opposed to init_single_realisation, which is for creating a single pattern).
@@ -321,8 +315,10 @@ class TurbGen
         if (verbose) TurbGen_printf("===============================================================================\n");
         // set solenoidal weight normalisation
         set_solenoidal_weight_normalisation();
+
         // initialise modes
         init_modes();
+
         // initialise Ornstein-Uhlenbeck sequence
         OU_noise_init();
         // calculate solenoidal and compressive coefficients (aka, akb) from OUphases
@@ -353,7 +349,7 @@ class TurbGen
     }; // check_for_update(time)
 
     // ******************************************************
-    public: bool check_for_update(const double time, const double v_turb[]) {
+    public: virtual bool check_for_update(const double time, const double v_turb[]) {
         // ******************************************************
         // Update driving pattern based on input 'time'.
         // If it is 'time' to update the pattern, call OU noise update
@@ -403,11 +399,6 @@ class TurbGen
         get_decomposition_coeffs(); // calculate solenoidal and compressive coefficients (aka, akb) from OUphases
         double time_gen = step * dt;
     
-    
-        #ifdef BL_AMREX_H
-            sync_to_GPU();
-        #endif
-
         if (verbose) TurbGen_printf("Generated new turbulence driving pattern: #%6i, time = %e, time/t_turb = %-7.2f\n", step, time_gen, time_gen/t_decay);
         if (PE == 0) write_to_evol_file(time, ampl_factor, v_turb); // write evolution file
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
@@ -553,155 +544,6 @@ class TurbGen
         } // k
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
     } // get_turb_vector_unigrid
-
-#ifdef BL_AMREX_H
-    private: void inital_sync_to_GPU(){
-        for (int dim = 0; dim < 3; dim++) {
-            modesGPU[dim].resize(mode[dim].size()); 
-            amrex::Gpu::copy(amrex::Gpu::hostToDevice, mode[dim].begin(), mode[dim].end(), modesGPU[dim].begin());
-         }
-    }
-
-    private: void sync_to_GPU(){
-        
-        {
-            AmplGPU.resize(ampl.size());
-            amrex::Gpu::PinnedVector<double> pinnedAmpl(ampl.size());
-            std::copy(ampl.begin(), ampl.end(), pinnedAmpl.begin());
-            amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedAmpl.begin(), pinnedAmpl.end(), AmplGPU.begin());
-        }
-
-
-        for (int dim = 0; dim < 3; dim++) {
-            akaGPU[dim].resize(aka[dim].size()); 
-            akbGPU[dim].resize(akb[dim].size()); 
-            {
-                amrex::Gpu::PinnedVector<double> pinnedAka(aka[dim].size());
-                std::copy(aka[dim].begin(), aka[dim].end(), pinnedAka.begin()); 
-                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedAka.begin(), pinnedAka.end(), akaGPU[dim].begin());
-            }
-            {
-                amrex::Gpu::PinnedVector<double> pinnedakb(akb[dim].size());
-                std::copy(akb[dim].begin(), akb[dim].end(), pinnedakb.begin()); 
-                amrex::Gpu::copy(amrex::Gpu::hostToDevice, pinnedakb.begin(), pinnedakb.end(), akbGPU[dim].begin());
-            }
-         }
-    }
-
-    public: void get_turb_vector_unigrid(amrex::FArrayBox& fab, amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const &cellSizes) {
-        // ******************************************************
-        // Compute physical turbulent vector field on a uniform grid, provided
-        // start coordinate pos_beg[ndim] and end coordinate pos_end[ndim]
-        // of the grid and number of points in grid n[ndim].
-        // Return into turbulent vector field into float * return_grid[ndim].
-        // Note that index in return_grid[X][index] is looped with x (index i)
-        // as the inner loop and with z (index k) as the outer loop.
-        // ******************************************************
-
-        // const double pos_beg[], const double pos_end[], const int n[]
-
-        const amrex::Box &box = fab.box();
-        amrex::Array4<amrex::Real> fieldArray = fab.array();
-
-        if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"entering.\n");
-
-        // compute output grid cell width (dx, dy, dz)
-        amrex::GpuArray<amrex::Real, 3> del{cellSizes[0], cellSizes[1], cellSizes[2]};
-
-        // pre-compute amplitude including normalisation factors
-        std::vector<double> ampl(nmodes);
-        for (int m = 0; m < nmodes; m++) ampl[m] = 2.0 * sol_weight_norm * this->AmplGPU[m];
-        // pre-compute grid position geometry, and trigonometry, to speed-up loops over modes below
-
-
-        amrex::Box xSpace(amrex::IntVect(AMREX_D_DECL(box.smallEnd()[0],0,0)), amrex::IntVect(AMREX_D_DECL(box.bigEnd()[0], 0,0)));
-        amrex::Box ySpace(amrex::IntVect(AMREX_D_DECL(0,box.smallEnd()[1],0)), amrex::IntVect(AMREX_D_DECL(0, box.bigEnd()[0],0)));
-        amrex::Box zSpace(amrex::IntVect(AMREX_D_DECL(0,0,box.smallEnd()[2])), amrex::IntVect(AMREX_D_DECL(0,0,box.bigEnd()[2])));
-
-        int comps =  nmodes * 2;
-        amrex::FArrayBox PrecompFab (box, comps);
-        amrex::Array4 Precomp = PrecompFab.array();
-
-        const double* ampl_factorPrt = ampl_factor;
-        double* AmplGPUPointer = AmplGPU.begin();
-
-        double* modesGpuPrt[3] = {modesGPU[0].begin(), modesGPU[1].begin(), modesGPU[2].begin()};
-        double* akaGpuPrt[3] = {akaGPU[0].begin(), akaGPU[1].begin(), akaGPU[2].begin()};
-        double* akbGpuPrt[3] = {akbGPU[0].begin(), akbGPU[1].begin(), akbGPU[2].begin()};
-
-
-        amrex::ParallelFor(xSpace, nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
-            const int SIN_INDEX = m;
-            const int COS_INDEX = m + nmodes; 
-
-            Precomp(i, j, k, SIN_INDEX) = sin(modesGpuPrt[X][m] * (i * del[X]));
-            Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[X][m] * (i * del[X]));
-        } );       
-
-        amrex::ParallelFor( ySpace,nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
-            const int SIN_INDEX = m;
-            const int COS_INDEX = m + nmodes; 
-            if (AMREX_SPACEDIM > 1) {
-                    Precomp(i,j,k,SIN_INDEX) = sin(modesGpuPrt[Y][m]*(j*del[Y]));
-                    Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[Y][m]*(j*del[Y]));
-                } else {
-                    Precomp(i,j,k,SIN_INDEX) = 0.0;
-                    Precomp(i, j, k, COS_INDEX) = 1.0;
-                }
-        });                
-
-        amrex::ParallelFor(zSpace, nmodes, [=] AMREX_GPU_DEVICE(int i,int j,int k, int m) {
-            const int SIN_INDEX = m;
-            const int COS_INDEX = m + nmodes; 
-            if (AMREX_SPACEDIM > 2) {
-                    Precomp(i, j, k, SIN_INDEX) = sin(modesGpuPrt[Z][m]*(k*del[Z]));
-                    Precomp(i, j, k, COS_INDEX) = cos(modesGpuPrt[Z][m]*(k*del[Z]));
-                } else {
-                    Precomp(i, j, k, SIN_INDEX) = 0.0;
-                    Precomp(i, j, k, COS_INDEX) = 1.0;
-                }
-        });
-
-        
-        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-            amrex::Real real, imag;
-            
-            amrex::Real v[3];
-
-            v[X] = 0.0; v[Y] = 0.0; v[Z] = 0.0;
-            // loop over modes
-            for (int m = 0; m < nmodes; m++) {
-                // these are the real and imaginary parts, respectively, of
-                //  e^{ i \vec{k} \cdot \vec{x} } = cos(kx*x + ky*y + kz*z) + i sin(kx*x + ky*y + kz*z)
-
-                const int SIN_INDEX = m;
-                const int COS_INDEX = m + nmodes; 
-
-                real =  ( Precomp(i,0, 0,COS_INDEX) * Precomp(0,j,0,COS_INDEX) - Precomp(i,0,0, SIN_INDEX) * Precomp(0,j,0,SIN_INDEX) ) * Precomp(0,0,k,COS_INDEX) -
-                        ( Precomp(i,0,0, SIN_INDEX) * Precomp(0,j,0,COS_INDEX) + Precomp(i,0,0, COS_INDEX) * Precomp(0,j,0,SIN_INDEX) ) * Precomp(0,0,k,SIN_INDEX);
-
-                imag =  ( Precomp(0,j,0,COS_INDEX) * Precomp(0,0,k,SIN_INDEX) + Precomp(0,j,0,SIN_INDEX) * Precomp(0,0,k,COS_INDEX) ) * Precomp(i,0,0,COS_INDEX) +
-                        ( Precomp(0,j,0,COS_INDEX) * Precomp(0,0,k,COS_INDEX) - Precomp(0,j,0,SIN_INDEX) * Precomp(0,0,k,SIN_INDEX) ) * Precomp(i,0,0, SIN_INDEX);
-
-                // accumulate total v as sum over modes
-                v[X] += AmplGPUPointer[m] * (akaGpuPrt[X][m]*real - akbGpuPrt[X][m]*imag);
-                if (AMREX_SPACEDIM > 1) v[Y] += AmplGPUPointer[m] * (akaGpuPrt[Y][m]*real - akbGpuPrt[Y][m]*imag);
-                if (AMREX_SPACEDIM > 2) v[Z] += AmplGPUPointer[m] * (akaGpuPrt[Z][m]*real - akbGpuPrt[Z][m]*imag);
-            }
-            // copy into return grid
-            fieldArray(i,j,k,0) = v[X] * ampl_factorPrt[X];
-            if (AMREX_SPACEDIM > 1) fieldArray(i,j,k,1) = v[Y] * ampl_factorPrt[Y];
-            if (AMREX_SPACEDIM > 2) fieldArray(i,j,k,2) = v[Z] * ampl_factorPrt[Z];
-
-        });
-
-        double a = fieldArray(0,0,0,0);
-        double b = 12; 
-
-        if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
-    } // get_turb_vector_unigrid (AMReX overload)
-
-#endif // AMReX Pluggins
 
     // ******************************************************
     public: void get_turb_vector(const double pos[], double v[]) {
@@ -1043,13 +885,6 @@ class TurbGen
 
         if (verbose > 1) TurbGen_printf(FuncSig(__func__)+"exiting.\n");
 
-        #ifdef BL_AMREX_H
-
-        inital_sync_to_GPU();
-
-        #endif
-
-
         return 0;
 
         
@@ -1239,7 +1074,7 @@ class TurbGen
 
 
     // ******************************************************
-    private: void TurbGen_printf(std::string format, ...) {
+    protected: void TurbGen_printf(std::string format, ...) {
         // ******************************************************
         // special printf prepends string and only lets PE=0 print
         // ******************************************************
@@ -1251,7 +1086,7 @@ class TurbGen
     }; // TurbGen_printf
 
     // ******************************************************
-    private: void TurbGen_printf_raw(std::string format, ...) {
+    protected: void TurbGen_printf_raw(std::string format, ...) {
         // ******************************************************
         // special printf prepends string and only lets PE=0 print
         // ******************************************************
