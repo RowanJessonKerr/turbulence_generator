@@ -1,15 +1,15 @@
-!!****if* source/physics/sourceTerms/Stir/StirFromFile/Stir_computeDt
+!!****if* source/physics/sourceTerms/Stir/StirMain/Stir_computeDt
 !!
 !! NAME
 !!  Stir_computeDt
 !!
 !! SYNOPSIS
-!!  Stir_computeDt(integer(IN)   :: blockID
-!!                 integer(IN)   :: blkLimits(2,MDIM)
-!!                 integer(IN)   :: blkLimitsGC(2,MDIM)
+!!  Stir_computeDt(integer(in)   :: blockID
+!!                 integer(in)   :: blkLimits(2,MDIM)
+!!                 integer(in)   :: blkLimitsGC(2,MDIM)
 !!                 real, pointer :: solnData(:,:,:,:)
-!!                 real(OUT)     :: dt_stir
-!!                 real(OUT)     :: dt_minloc(5))
+!!                 real(out)     :: dt_stir
+!!                 real(out)     :: dt_minloc(5))
 !!
 !! DESCRIPTION
 !!  compute a turbulent stirring timestep limiter
@@ -26,6 +26,9 @@
 !! SEE ALSO
 !!  Driver_computeDt
 !!
+!! AUTHOR
+!!  Christoph Federrath
+!!
 !!***
 
 subroutine Stir_computeDt(blockID, blkLimits, blkLimitsGC, solnData, dt_stir, dt_minloc)
@@ -34,6 +37,7 @@ subroutine Stir_computeDt(blockID, blkLimits, blkLimitsGC, solnData, dt_stir, dt
   use Driver_interface, ONLY: Driver_getSimTime
   use Driver_data, ONLY : dr_globalMe
   use Grid_interface, ONLY : Grid_getDeltas
+  use iso_c_binding, ONLY : c_double
 
 #include "constants.h"
 #include "Flash.h"
@@ -42,14 +46,15 @@ subroutine Stir_computeDt(blockID, blkLimits, blkLimitsGC, solnData, dt_stir, dt
 
   !! arguments
   integer, intent(in) :: blockID
-  integer, intent(in), dimension(2,MDIM)::blkLimits, blkLimitsGC
+  integer, intent(in), dimension(2,MDIM) :: blkLimits, blkLimitsGC
   real, pointer :: solnData(:,:,:,:)
   real, intent(inout) :: dt_stir
   integer, intent(inout) :: dt_minloc(5)
 
   real, dimension(MDIM) :: delta
-  real :: dt_temp, time
-  integer :: i,j,k
+  real :: dt_temp
+  real(c_double) :: time
+  integer :: i, j, k
 
   !!===================================================================
 
@@ -57,7 +62,7 @@ subroutine Stir_computeDt(blockID, blkLimits, blkLimitsGC, solnData, dt_stir, dt
   if ((.not.st_useStir).or.(.not.st_computeDt).or.(time.ge.st_stop_driving_time)) return
 
   ! initialize the timestep from this block to some high number
-  dt_temp = HUGE(0.0)
+  dt_temp = huge(0.0)
   call Grid_getDeltas(blockID, delta)
 
   do k = blkLimitsGC(LOW,KAXIS), blkLimitsGC(HIGH,KAXIS)

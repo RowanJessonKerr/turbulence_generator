@@ -1,4 +1,4 @@
-!!****if* source/physics/sourceTerms/Stir/StirFromFileMain/Stir_init
+!!****if* source/physics/sourceTerms/Stir/StirMain/Stir_init
 !!
 !! NAME
 !!  Stir_init
@@ -7,10 +7,10 @@
 !!  Stir_init(logical(in) :: restart)
 !!
 !! DESCRIPTION
-!!  Initialise turbulence driving; read parameters in turbulence generator input file
+!!  Initialise turbulence driving
 !!
 !! ARGUMENTS
-!!   restart -restarting from checkpoint?
+!!   restart - restarting from checkpoint?
 !!
 !! PARAMETERS
 !!   These are the runtime parameters used in the Stir unit.
@@ -18,12 +18,12 @@
 !!    useStir        [BOOLEAN]
 !!        Switch to turn stirring on or off at runtime.
 !!    st_infilename  [CHARACTER]
-!!        file containing the stirring modes time sequence
+!!        file containing the turbulence stirring parameters
 !!    st_computeDt   [BOOLEAN]
 !!        whether to restrict timestep based on stirring
 !!
 !! AUTHOR
-!!  Christoph Federrath, 2008-2023
+!!  Christoph Federrath
 !!
 !!***
 
@@ -33,6 +33,7 @@ subroutine Stir_init(restart)
   use Driver_data, ONLY : dr_globalMe
   use Driver_interface, ONLY : Driver_getSimTime
   use RuntimeParameters_interface, ONLY : RuntimeParameters_get
+  use iso_c_binding, ONLY : c_double
 
   implicit none
 
@@ -40,7 +41,7 @@ subroutine Stir_init(restart)
 #include "Flash.h"
 
   logical, intent(in) :: restart
-  real :: time
+  real(c_double) :: time
 
   call RuntimeParameters_get('useStir', st_useStir)
   call RuntimeParameters_get('st_infilename', st_infilename)
@@ -50,14 +51,14 @@ subroutine Stir_init(restart)
   call Driver_getSimTime(time)
 
   if (.not. st_useStir) then
-    if (dr_globalMe .eq. MASTER_PE) &
-      write(*,'(A)') 'Stir_init: WARNING: You have included the StirFromFile unit but useStir = .false.'
+    if (dr_globalMe == MASTER_PE) &
+      write(*,'(A)') 'Stir_init: WARNING: You have included the Stir unit but useStir = .false.'
     return
   endif
 
   ! initialise the turbulence generator based on parameter file provided in st_infilename
   ! and time (in case of restart and automatic amplitude adjustment; ampl_auto_adjust = 1)
-  call st_stir_init_driving_c(trim(st_infilename)//char(0), real(time,kind=8), dt_update_accel);
+  call st_stir_init_driving_c(trim(st_infilename)//char(0), real(time,kind=c_double), dt_update_accel);
 
   return
 

@@ -1,4 +1,4 @@
-!!****if* source/physics/sourceTerms/Stir/StirFromFileMain/Stir
+!!****if* source/physics/sourceTerms/Stir/StirMain/Stir
 !!
 !! NAME
 !!  Stir
@@ -18,7 +18,7 @@
 !!   pass         : optional: dt-pass, in case of split solver
 !!
 !! AUTHOR
-!!   Christoph Federrath, 2008-2024
+!!   Christoph Federrath
 !!
 !!    (Aug 2013: added a write-out of the correction for the center-of-mass motion)
 !!    (2012: added a pre-proc statement to treat the acceleration field as a force for testing; not the default)
@@ -43,29 +43,30 @@ subroutine Stir(blockCount, blockList, dt, pass)
 #ifdef FLASH_IO
   use IO_data, ONLY : io_integralFreq
 #endif
+  use iso_c_binding, ONLY : c_double
 
   implicit none
 
 #include "Flash_mpi.h"
 
   integer, intent(in)                        :: blockCount
-  integer, dimension(blockCount), intent(IN) :: blockList
+  integer, dimension(blockCount), intent(in) :: blockList
   real, intent(in)                           :: dt
   integer, intent(in), optional              :: pass
 
   logical, save              :: firstCall=.true., driving_stopped=.false.
-  real, save                 :: last_time = HUGE(real(1.0))
+  real, save                 :: last_time = huge(real(1.0))
   integer                    :: blockID, i, j, k, ii, jj, kk
   integer, dimension(2,MDIM) :: blkLimits, blkLimitsGC
   logical                    :: update_accel = .true.
   integer                    :: update_accel_int, error
   real, dimension(MDIM)      :: del, blockSize, blockCenter ! MDIM is always 3
-  real(kind=8)               :: pos_beg(MDIM), pos_end(MDIM)
+  real(c_double)             :: pos_beg(MDIM), pos_end(MDIM)
   integer                    :: ncells(MDIM)
   real                       :: ekin_old, ekin_new, d_ekin
-  real*8                     :: time
+  real(c_double)             :: time
   real                       :: volume, mass, momentum(MDIM), force(MDIM)
-  real(kind=8)               :: v_turb(MDIM) ! turbulent velocity dispersion (for amplitude auto adjustment in TurbGen)
+  real(c_double)             :: v_turb(MDIM) ! turbulent velocity dispersion (for amplitude auto adjustment in TurbGen)
 
   integer, parameter :: funit = 22
   character(len=80)  :: outfile = "stir.dat"
@@ -79,15 +80,15 @@ subroutine Stir(blockCount, blockList, dt, pass)
 ! this is to determine whether we remove the average force and average momentum in every timestep
 #define CORRECT_BULK_MOTION
 #ifdef CORRECT_BULK_MOTION
-  real(kind=8) :: correction
+  real(c_double) :: correction
 #else
-  real(kind=8), parameter :: correction = 0.0
+  real(c_double), parameter :: correction = 0.0
 #endif
 
 #ifdef HYBRID_PRECISION
   integer, parameter :: flash_real_dtype = FLASH_DOUBLE
-  real(kind=8) :: locSumVars(0:7), globSumVars(0:7) ! locally and globally summed variables
-  real(kind=8) :: ekin_added, ekin_added_red, dvol, dmass, accel
+  real(c_double) :: locSumVars(0:7), globSumVars(0:7) ! locally and globally summed variables
+  real(c_double) :: ekin_added, ekin_added_red, dvol, dmass, accel
 #else
   integer, parameter :: flash_real_dtype = FLASH_REAL
   real         :: locSumVars(0:7), globSumVars(0:7) ! locally and globally summed variables
@@ -113,7 +114,7 @@ subroutine Stir(blockCount, blockList, dt, pass)
 
   call Driver_getSimTime(time)
 
-  if (time .ge. st_stop_driving_time) then
+  if (time >= st_stop_driving_time) then
     driving_stopped = .true.
     ! clear the acceleration field
     accx(:,:,:) = 0.0
@@ -207,7 +208,7 @@ subroutine Stir(blockCount, blockList, dt, pass)
 
   ! check if we need to update the turbulent acceleration field
   update_accel = .false.
-  call st_stir_check_for_update_of_turb_pattern_c(real(time,kind=8), update_accel_int, v_turb)
+  call st_stir_check_for_update_of_turb_pattern_c(real(time,kind=c_double), update_accel_int, v_turb)
   if (update_accel_int .ne. 0) update_accel = .true.
 
 #ifdef CORRECT_BULK_MOTION
@@ -417,14 +418,14 @@ subroutine Stir(blockCount, blockList, dt, pass)
   enddo ! loop over blocks
 
   ! write time evolution of ekin_added to file
-  if (io_integralFreq .gt. 0) then
+  if (io_integralFreq > 0) then
     ! synchronise output frequency with IO_output's use of io_integralFreq
     check_for_io = .true.
-    if (PRESENT(pass)) then
-      if (pass .eq. 1) check_for_io = .false.
+    if (present(pass)) then
+      if (pass == 1) check_for_io = .false.
     endif
-    if ((check_for_io) .and. (mod(dr_nstep+1, io_integralFreq) .eq. 0)) then
-      if (abs(time - last_time) .gt. TINY(time)) then
+    if ((check_for_io) .and. (mod(dr_nstep+1, io_integralFreq) == 0)) then
+      if (abs(time - last_time) > tiny(time)) then
         last_time = time
         ! sum up injected kinetic energy contributions from all blocks and processors
         ekin_added_red = 0.0
@@ -440,7 +441,7 @@ subroutine Stir(blockCount, blockList, dt, pass)
     endif
   endif
 
-  call Timers_stop ("Stir")
+  call Timers_stop("Stir")
 
   return
 
